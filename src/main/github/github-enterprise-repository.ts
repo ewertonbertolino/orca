@@ -12,6 +12,11 @@ import {
   parseGitHubRemoteIdentity,
   type LocalGitExecOptions
 } from './github-repository-identity'
+import {
+  effectiveGitHubRemoteHost,
+  gitHubSshConfigHostAlias
+} from './github-remote-identity-parsing'
+import { resolveSshConfigHostname } from './github-ssh-host-alias-resolution'
 import { parseWslPath } from '../wsl'
 
 export type GitHubEnterpriseRepoSlug = GitHubOwnerRepo & { host: string }
@@ -225,11 +230,24 @@ export async function getEnterpriseGitHubRepoSlugForRemote(
     return null
   }
   const identity = remoteUrl ? parseGitHubRemoteIdentity(remoteUrl) : null
-  if (!identity || identity.host === 'github.com') {
+  if (!identity) {
+    return null
+  }
+  // Why: SSH config Host aliases must expand before GHES vs github.com routing
+  // and before matching gh auth inventory (#10284 multi-account / enterprise).
+  let effectiveHost = identity.host
+  const aliasHost = remoteUrl ? gitHubSshConfigHostAlias(remoteUrl) : null
+  if (aliasHost) {
+    const { hostname, resolved } = await resolveSshConfigHostname(aliasHost)
+    if (resolved && hostname) {
+      effectiveHost = effectiveGitHubRemoteHost(identity.host, hostname)
+    }
+  }
+  if (effectiveHost === 'github.com') {
     return null
   }
   const authenticatedHost = await resolveAuthenticatedGitHubHost(
-    identity.host,
+    effectiveHost,
     repoPath,
     connectionId,
     localGitOptions

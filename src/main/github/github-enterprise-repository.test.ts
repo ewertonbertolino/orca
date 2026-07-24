@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { ghExecFileAsyncMock, gitExecFileAsyncMock } = vi.hoisted(() => ({
+const { ghExecFileAsyncMock, gitExecFileAsyncMock, resolveWithSshGMock } = vi.hoisted(() => ({
   ghExecFileAsyncMock: vi.fn(),
-  gitExecFileAsyncMock: vi.fn()
+  gitExecFileAsyncMock: vi.fn(),
+  resolveWithSshGMock: vi.fn()
 }))
 
 // Mock only the exec boundary so the real remote-identity parsing, runtime
@@ -12,12 +13,17 @@ vi.mock('../git/runner', () => ({
   gitExecFileAsync: gitExecFileAsyncMock
 }))
 
+vi.mock('../ssh/ssh-g-config-resolution', () => ({
+  resolveWithSshG: resolveWithSshGMock
+}))
+
 import {
   _resetGitHubHostAuthCache,
   getEnterpriseGitHubRepoSlug,
   isGitHubHostAuthenticated,
   isGitHubHostAuthenticatedForGlobalCli
 } from './github-enterprise-repository'
+import { _resetSshHostnameResolutionCache } from './github-ssh-host-alias-resolution'
 
 function mockOriginRemote(url: string): void {
   gitExecFileAsyncMock.mockImplementation(async (args: string[]) => {
@@ -56,7 +62,10 @@ describe('getEnterpriseGitHubRepoSlug', () => {
   beforeEach(() => {
     ghExecFileAsyncMock.mockReset()
     gitExecFileAsyncMock.mockReset()
+    resolveWithSshGMock.mockReset()
+    resolveWithSshGMock.mockResolvedValue(null)
     _resetGitHubHostAuthCache()
+    _resetSshHostnameResolutionCache()
   })
 
   it('resolves a GHES remote whose host the user is gh-authenticated to (#8312)', async () => {
@@ -82,6 +91,45 @@ describe('getEnterpriseGitHubRepoSlug', () => {
       repo: 'orca',
       host: 'github.acme-corp.com'
     })
+  })
+
+  it('expands an SSH Host alias to the authenticated GHES HostName (#10284)', async () => {
+    mockOriginRemote('git@ghe-work:team/orca.git')
+    resolveWithSshGMock.mockResolvedValueOnce({
+      hostname: 'github.acme-corp.com',
+      port: 22,
+      identityFile: [],
+      identitiesOnly: false,
+      forwardAgent: false,
+      proxyUseFdpass: false,
+      controlMaster: 'no',
+      controlPersist: 'no'
+    })
+    mockHostAuthenticated('github.acme-corp.com')
+
+    await expect(getEnterpriseGitHubRepoSlug('/repo')).resolves.toEqual({
+      owner: 'team',
+      repo: 'orca',
+      host: 'github.acme-corp.com'
+    })
+    expect(resolveWithSshGMock).toHaveBeenCalledWith('ghe-work')
+  })
+
+  it('returns null for a Host alias that resolves to github.com (dotcom path owns it)', async () => {
+    mockOriginRemote('git@github-work:team/orca.git')
+    resolveWithSshGMock.mockResolvedValueOnce({
+      hostname: 'ssh.github.com',
+      port: 443,
+      identityFile: [],
+      identitiesOnly: true,
+      forwardAgent: false,
+      proxyUseFdpass: false,
+      controlMaster: 'no',
+      controlPersist: 'no'
+    })
+
+    await expect(getEnterpriseGitHubRepoSlug('/repo')).resolves.toBeNull()
+    expect(ghExecFileAsyncMock).not.toHaveBeenCalled()
   })
 
   it('uses the unique ported auth host for a hostname-only SSH remote', async () => {
