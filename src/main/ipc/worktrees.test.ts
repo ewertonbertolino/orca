@@ -3842,6 +3842,12 @@ describe('registerWorktreeHandlers', () => {
       ])
     }
     const fsProvider = {
+      stat: vi.fn(async (filePath: string) => {
+        if (filePath.endsWith('orca.yaml')) {
+          return { size: 32, type: 'file', mtime: 0 }
+        }
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      }),
       readFile: vi.fn().mockResolvedValue({
         content: 'scripts:\n  setup: pnpm install\n',
         isBinary: false

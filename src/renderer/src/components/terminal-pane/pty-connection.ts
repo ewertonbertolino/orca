@@ -4561,9 +4561,6 @@ export function connectPanePty(
             ? launchConfig.agentEnv
             : resolveTuiAgentLaunchEnv(agent, state.settings?.agentDefaultEnv),
         ...(launchConfig?.agentCommand ? { agentCommand: launchConfig.agentCommand } : {}),
-        ...(launchConfig?.ompResumeFilePath
-          ? { ompResumeFilePath: launchConfig.ompResumeFilePath }
-          : {}),
         platform: resumePlatform
       })
       if (!startupPlan) {
@@ -7294,30 +7291,6 @@ export function connectPanePty(
       if (!isCurrentReattachPayload()) {
         return false
       }
-      // Strict precedence snapshot > replay > coldRestore: paint exactly one, else overlapping tails duplicate TUI output on worktree switch.
-      const hasStructuralReplay = Boolean(
-        connectResult?.snapshot || connectResult?.replay || connectResult?.coldRestore
-      )
-      const resumeComesFromPassiveHibernation = Boolean(
-        coldRestoreStartup &&
-        !coldRestoreStartup.useLiveEntry &&
-        coldRestoreStartup.sleepingRecordEntry &&
-        isPassiveCompletedHibernationEvidence(coldRestoreStartup.sleepingRecordEntry.record)
-      )
-      // Why: reattach drops startup commands; only passive hibernation is authority to retire an empty adopted shell and resume its provider session.
-      if (!hasStructuralReplay && connectResult?.isReattach && resumeComesFromPassiveHibernation) {
-        transport.disconnect()
-        if (staleSessionId) {
-          deps.clearExitedPanePtyLayoutBinding(pane.id, staleSessionId)
-          deps.clearTabPtyId(deps.tabId, staleSessionId)
-        } else {
-          deps.syncPanePtyLayoutBinding(pane.id, null)
-        }
-        startFreshColdRestoreAgentResume(coldRestoreStartup, {
-          forceBlankRestoredViewport: true
-        })
-        return false
-      }
       setPanePtyFitBinding(ptyId)
       reportPanePtyVisibility(ptyId, deps.isVisibleRef.current)
       registerSideEffectFactConsumerForPty(ptyId)
@@ -7330,6 +7303,10 @@ export function connectPanePty(
       // Why: mobile streaming needs xterm's exact screen state; install the serializer + lastTitle source for main-process hydration parity.
       registerPaneSerializerFor(ptyId)
 
+      // Strict precedence snapshot > replay > coldRestore: paint exactly one, else overlapping tails duplicate TUI output on worktree switch.
+      const hasStructuralReplay = Boolean(
+        connectResult?.snapshot || connectResult?.replay || connectResult?.coldRestore
+      )
       let reattachPayloadApplied = !hasStructuralReplay
       const applyReattachPayload = async (): Promise<void> => {
         if (!isCurrentReattachPayload()) {
@@ -7759,9 +7736,7 @@ export function connectPanePty(
                 finishReattachLiveDataDeferral(accepted, outputCallbacks.generation)
                 const gen = await preSignalPromise
                 if (typeof gen === 'number') {
-                  if (!accepted) {
-                    await window.api.pty.clearPendingPaneSerializer(cacheKey, gen).catch(() => {})
-                  } else if (!isRemoteRuntimePtyId(pendingSessionId)) {
+                  if (!isRemoteRuntimePtyId(pendingSessionId)) {
                     const settledPtyId =
                       result && typeof result === 'object' && 'id' in result
                         ? result.id
@@ -7972,9 +7947,7 @@ export function connectPanePty(
           finishReattachLiveDataDeferral(accepted, outputCallbacks.generation)
           const gen = await preSignalPromise
           if (typeof gen === 'number') {
-            if (!accepted) {
-              await window.api.pty.clearPendingPaneSerializer(cacheKey, gen).catch(() => {})
-            } else if (!isRemoteRuntimePtyId(deferredReattachSessionId)) {
+            if (!isRemoteRuntimePtyId(deferredReattachSessionId)) {
               const settledPtyId =
                 result && typeof result === 'object' && 'id' in result
                   ? result.id

@@ -122,12 +122,12 @@ import {
 
 const ORIGINAL_PLATFORM = process.platform
 const ORIGINAL_PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, 'platform')
+const TEST_MAX_HOOK_GITIGNORE_BYTES = 4 * 1024 * 1024
 const removeWorktreeLinkedPathsMock = vi.hoisted(() => vi.fn())
 const findExistingWorktreeSymlinkPathsMock = vi.hoisted(() => vi.fn())
 const resolveLocalGitUsernameMock = vi.hoisted(() => vi.fn(async () => ''))
 
 vi.mock('../ipc/worktree-symlinks', () => ({
-  createWorktreeCopiedPaths: vi.fn(),
   createWorktreeLinkedPaths: vi.fn(),
   findExistingWorktreeSymlinkPaths: findExistingWorktreeSymlinkPathsMock,
   removeWorktreeLinkedPaths: removeWorktreeLinkedPathsMock
@@ -224,7 +224,6 @@ const {
   getRepoSlugMock,
   getRepoUpstreamMock,
   getGitHubWorkItemMock,
-  getPullRequestPushTargetMock,
   getGitHubWorkItemByOwnerRepoMock,
   getGitHubWorkItemDetailsMock,
   getGitHubPRFileContentsMock,
@@ -330,7 +329,6 @@ const {
     getRepoSlugMock: vi.fn().mockResolvedValue(null),
     getRepoUpstreamMock: vi.fn().mockResolvedValue(null),
     getGitHubWorkItemMock: vi.fn(),
-    getPullRequestPushTargetMock: vi.fn(),
     getGitHubWorkItemByOwnerRepoMock: vi.fn(),
     getGitHubWorkItemDetailsMock: vi.fn(),
     getGitHubPRFileContentsMock: vi.fn(),
@@ -450,6 +448,8 @@ vi.mock('../hooks', () => ({
     ORCA_ROOT_PATH: '/remote/repo',
     ORCA_WORKTREE_PATH: worktreePath
   }),
+  MAX_HOOK_GITIGNORE_BYTES: 4 * 1024 * 1024,
+  MAX_ISSUE_COMMAND_BYTES: 1024 * 1024,
   loadHooks: vi.fn().mockReturnValue(null),
   runHook: vi.fn().mockResolvedValue({ success: true, output: '' }),
   shouldRunSetupForCreate: vi
@@ -498,7 +498,6 @@ vi.mock('../github/client', async (importOriginal) => {
     getRepoSlug: getRepoSlugMock,
     getRepoUpstream: getRepoUpstreamMock,
     getWorkItem: getGitHubWorkItemMock,
-    getPullRequestPushTarget: getPullRequestPushTargetMock,
     getWorkItemByOwnerRepo: getGitHubWorkItemByOwnerRepoMock,
     getPRChecks: getGitHubPRChecksMock,
     rerunPRChecks: rerunGitHubPRChecksMock,
@@ -711,8 +710,6 @@ function resetRuntimeTestMocks(): void {
   getRepoUpstreamMock.mockResolvedValue(null)
   getGitHubWorkItemMock.mockReset()
   getGitHubWorkItemMock.mockResolvedValue(null)
-  getPullRequestPushTargetMock.mockReset()
-  getPullRequestPushTargetMock.mockResolvedValue(null)
   getGitHubWorkItemByOwnerRepoMock.mockReset()
   getGitHubWorkItemByOwnerRepoMock.mockResolvedValue(null)
   getGitHubWorkItemDetailsMock.mockReset()
@@ -1847,30 +1844,7 @@ describe('OrcaRuntimeService', () => {
     expect(hasPty).toHaveBeenCalledTimes(4)
     expect(hasPty).toHaveBeenCalledWith(floatingPtyId)
     expect(listProcesses).not.toHaveBeenCalled()
-    // Why: a floating tab's worktree id carries no repoId, so the hydrate repo gate
-    // must never resolve the inventory for it — #9343 made that read eager and
-    // regressed this poll path. Keep both halves of the contract asserted.
     expect(getRepos).not.toHaveBeenCalled()
-  })
-
-  it('hydrates persisted tabs when the store cannot report repos', async () => {
-    // Why: #9343 read the repo gate as `getRepos?.() ?? []`, so a store that cannot
-    // report its inventory looked like "every repo is gone" and hydrated nothing —
-    // every tab vanished. An unavailable list must fail open; only a list the store
-    // actually returned may prune a dead repo's session key.
-    const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession(
-      makeWorkspaceSessionWithHeadlessTerminal()
-    )
-    const runtime = new OrcaRuntimeService({
-      ...runtimeStore,
-      getRepos: () => undefined
-    } as never)
-
-    const tabs = await runtime.listMobileSessionTabs(`id:${TEST_WORKTREE_ID}`)
-
-    expect(tabs.tabs).toEqual([
-      expect.objectContaining({ type: 'terminal', parentTabId: 'host-tab' })
-    ])
   })
 
   it('advertises browser screencast only when a renderer window is available', () => {
@@ -1880,124 +1854,6 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(TEST_WINDOW_ID)
 
     expect(runtime.getStatus().capabilities).toContain('browser.screencast.v1')
-  })
-
-  it('advertises safe Codex reset-credit RPC support as a static capability', () => {
-    const runtime = createRuntime()
-
-    expect(runtime.getStatus().capabilities).toContain('accounts.codex-reset-credit.v1')
-  })
-
-  it('routes mobile Codex reset consumption through the account mutation coordinator', async () => {
-    const runtime = createRuntime()
-    const expectedScope = {
-      target: { runtime: 'host' as const, wslDistro: null },
-      accountId: 'codex-account',
-      accountRevision: 42,
-      offerRevision: 'v1:offer'
-    }
-    const capturedCodex = {
-      accounts: [],
-      activeAccountId: expectedScope.accountId,
-      activeAccountIdsByRuntime: { host: expectedScope.accountId, wsl: {} }
-    }
-    const capturedRateLimits = {
-      codexTarget: expectedScope.target,
-      marker: 'captured-before-queue-advanced'
-    }
-    const codexAccounts = {
-      consumeRateLimitResetCredit: vi.fn().mockResolvedValue({
-        outcome: 'reset',
-        scope: expectedScope,
-        codex: capturedCodex,
-        rateLimits: capturedRateLimits
-      }),
-      listAccounts: vi.fn(() => ({
-        accounts: [],
-        activeAccountId: 'queued-next-account',
-        activeAccountIdsByRuntime: { host: 'queued-next-account', wsl: {} }
-      }))
-    }
-    const rateLimits = {
-      consumeCodexRateLimitResetCredit: vi.fn(),
-      getState: vi.fn(() => ({
-        codexTarget: expectedScope.target,
-        marker: 'after-queue-advanced'
-      }))
-    }
-    runtime.setAccountServices({
-      claudeAccounts: {
-        listAccounts: vi.fn(() => ({ accounts: [], activeAccountId: null }))
-      },
-      codexAccounts,
-      rateLimits
-    } as never)
-
-    const result = await runtime.consumeCodexRateLimitResetCredit(
-      '11111111-1111-4111-8111-111111111111',
-      expectedScope
-    )
-
-    expect(result).toMatchObject({
-      outcome: 'reset',
-      scope: expectedScope,
-      snapshot: { codex: capturedCodex, rateLimits: capturedRateLimits }
-    })
-    expect(codexAccounts.listAccounts).not.toHaveBeenCalled()
-    expect(rateLimits.getState).not.toHaveBeenCalled()
-    expect(codexAccounts.consumeRateLimitResetCredit).toHaveBeenCalledWith(
-      '11111111-1111-4111-8111-111111111111',
-      expectedScope
-    )
-    expect(rateLimits.consumeCodexRateLimitResetCredit).not.toHaveBeenCalled()
-  })
-
-  it('maps a definite pre-provider rejection into an authoritative current snapshot', async () => {
-    const runtime = createRuntime()
-    const expectedScope = {
-      target: { runtime: 'host' as const, wslDistro: null },
-      accountId: 'codex-account',
-      accountRevision: 42,
-      offerRevision: 'v1:stale'
-    }
-    const codex = {
-      accounts: [],
-      activeAccountId: null,
-      activeAccountIdsByRuntime: { host: null, wsl: {} }
-    }
-    const rateLimitState = {
-      codexTarget: expectedScope.target,
-      marker: 'current-after-rejection'
-    }
-    runtime.setAccountServices({
-      claudeAccounts: {
-        listAccounts: vi.fn(() => ({ accounts: [], activeAccountId: null }))
-      },
-      codexAccounts: {
-        consumeRateLimitResetCredit: vi.fn().mockResolvedValue({
-          status: 'rejectedBeforeProvider',
-          retryDisposition: 'discardAttempt',
-          reason: 'offerChanged',
-          scope: expectedScope,
-          codex,
-          rateLimits: rateLimitState
-        })
-      },
-      rateLimits: {}
-    } as never)
-
-    await expect(
-      runtime.consumeCodexRateLimitResetCredit(
-        '11111111-1111-4111-8111-111111111111',
-        expectedScope
-      )
-    ).resolves.toMatchObject({
-      status: 'rejectedBeforeProvider',
-      retryDisposition: 'discardAttempt',
-      reason: 'offerChanged',
-      scope: expectedScope,
-      snapshot: { codex, rateLimits: rateLimitState }
-    })
   })
 
   it('advertises headless browser capability when an offscreen backend backs a windowless host', () => {
@@ -2011,6 +1867,7 @@ describe('OrcaRuntimeService', () => {
     expect(capabilities).toContain('browser.headless.v1')
     expect(capabilities).toContain('browser.certificate-trust.v1')
   })
+
   it('surfaces live offscreen load failures in headless browser snapshots', () => {
     const runtime = createRuntime()
     runtime.setOffscreenBrowserBackend({ createTab: vi.fn(), closeTab: vi.fn() })
@@ -3432,7 +3289,10 @@ describe('OrcaRuntimeService', () => {
 
     expect(listWorktrees).not.toHaveBeenCalled()
     expect(gitProvider.listWorktrees).toHaveBeenCalledWith('//Server/Share/Repo')
-    expect(fsProvider.readDir).toHaveBeenCalledWith('\\\\Server\\Share\\Repo\\src')
+    expect(fsProvider.readDir).toHaveBeenCalledWith('\\\\Server\\Share\\Repo\\src', {
+      maxEntries: 10_000,
+      maxRetainedBytes: 4 * 1024 * 1024
+    })
     expect(gitProvider.getStatus).toHaveBeenCalledWith('//Server/Share/Repo')
   })
 
@@ -3499,7 +3359,10 @@ describe('OrcaRuntimeService', () => {
     }
 
     expect(fsProvider.stat).toHaveBeenCalledWith(folderPath)
-    expect(fsProvider.readDir).toHaveBeenCalledWith('/srv/platform/src')
+    expect(fsProvider.readDir).toHaveBeenCalledWith('/srv/platform/src', {
+      maxEntries: 10_000,
+      maxRetainedBytes: 4 * 1024 * 1024
+    })
     expect(fsProvider.stat).toHaveBeenCalledWith('/srv/platform/src/app.ts')
     expect(fsProvider.readFile).toHaveBeenCalledWith('/srv/platform/src/app.ts')
   })
@@ -5371,6 +5234,12 @@ describe('OrcaRuntimeService', () => {
       listWorktrees: vi.fn().mockResolvedValue([created])
     }
     const fsProvider = {
+      stat: vi.fn(async (filePath: string) => {
+        if (filePath.endsWith('orca.yaml')) {
+          return { size: 7, type: 'file', mtime: 0 }
+        }
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      }),
       readFile: vi.fn().mockResolvedValue({ isBinary: false, content: 'hooks:\n' }),
       createDir: vi.fn().mockResolvedValue(undefined),
       writeFile: vi.fn().mockResolvedValue(undefined)
@@ -5528,6 +5397,12 @@ describe('OrcaRuntimeService', () => {
       listWorktrees: vi.fn().mockResolvedValue([created])
     }
     const fsProvider = {
+      stat: vi.fn(async (filePath: string) => {
+        if (filePath.endsWith('orca.yaml')) {
+          return { size: 7, type: 'file', mtime: 0 }
+        }
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      }),
       readFile: vi.fn().mockResolvedValue({ isBinary: false, content: 'hooks:\n' }),
       createDir: vi.fn().mockResolvedValue(undefined),
       writeFile: vi.fn().mockResolvedValue(undefined)
@@ -5740,6 +5615,7 @@ describe('OrcaRuntimeService', () => {
       ]
     }
     const fsProvider = {
+      stat: vi.fn().mockResolvedValue({ size: 32, type: 'file', mtime: 0 }),
       readFile: vi.fn().mockResolvedValue({
         content: 'scripts:\n  setup: pnpm install\n',
         isBinary: false
@@ -5816,6 +5692,7 @@ describe('OrcaRuntimeService', () => {
       ]
     }
     const fsProvider = {
+      stat: vi.fn().mockResolvedValue({ size: 32, type: 'file', mtime: 0 }),
       readFile: vi.fn(async (filePath: string) => ({
         content: filePath.endsWith('orca.yaml')
           ? 'scripts:\n  setup: pnpm install\n'
@@ -5861,6 +5738,49 @@ describe('OrcaRuntimeService', () => {
     )
   })
 
+  it('does not materialize an oversized SSH .gitignore while writing an issue command', async () => {
+    const remoteStore = {
+      ...store,
+      getRepos: () => [
+        {
+          id: TEST_REPO_ID,
+          path: '/remote/repo',
+          displayName: 'repo',
+          badgeColor: 'blue',
+          addedAt: 1,
+          connectionId: 'ssh-1'
+        }
+      ]
+    }
+    const fsProvider = {
+      stat: vi.fn().mockResolvedValue({
+        size: TEST_MAX_HOOK_GITIGNORE_BYTES + 1,
+        type: 'file',
+        mtime: 0
+      }),
+      readFile: vi.fn(),
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      createDir: vi.fn().mockResolvedValue(undefined)
+    }
+    registerSshFilesystemProvider('ssh-1', fsProvider as never)
+    const runtime = new OrcaRuntimeService(remoteStore as never)
+
+    try {
+      await expect(runtime.writeRepoIssueCommand('id:repo-1', 'Ship it')).resolves.toEqual({
+        ok: true
+      })
+    } finally {
+      unregisterSshFilesystemProvider('ssh-1')
+    }
+
+    expect(fsProvider.readFile).not.toHaveBeenCalled()
+    expect(fsProvider.writeFile).toHaveBeenCalledOnce()
+    expect(fsProvider.writeFile).toHaveBeenCalledWith(
+      '/remote/repo/.orca/issue-command',
+      'Ship it\n'
+    )
+  })
+
   it('resolves SSH issue commands from shared orca.yaml and deletes empty overrides', async () => {
     const remoteStore = {
       ...store,
@@ -5880,6 +5800,7 @@ describe('OrcaRuntimeService', () => {
       issueCommand: 'claude -p "Fix #{{issue}}"'
     })
     const fsProvider = {
+      stat: vi.fn().mockResolvedValue({ size: 48, type: 'file', mtime: 0 }),
       readFile: vi.fn(async (filePath: string) => {
         if (filePath.endsWith('.orca/issue-command')) {
           throw Object.assign(new Error('missing'), { code: 'ENOENT' })
@@ -11054,7 +10975,7 @@ describe('OrcaRuntimeService', () => {
     expect(internals.ptysById.has('pty-exited-during-start')).toBe(false)
   })
 
-  it('adopts repeated structured OMP resumes while preserving the exact file locator', async () => {
+  it('adopts the execution owner canonical surface for repeated structured resumes', async () => {
     let canonicalOwner:
       | {
           claim: AgentSessionExecutionClaim
@@ -11093,9 +11014,8 @@ describe('OrcaRuntimeService', () => {
     const request = {
       kind: 'explicit' as const,
       worktree: `id:${TEST_WORKTREE_ID}`,
-      agent: 'omp' as const,
-      providerSession: { key: 'session_id' as const, id: 'provider-session-1' },
-      ompResumeFilePath: '/custom/omp/project/session.jsonl'
+      agent: 'codex' as const,
+      providerSession: { key: 'session_id' as const, id: 'provider-session-1' }
     }
     const first = await runtime.ensureAgentSession(request)
     const second = await runtime.ensureAgentSession(request)
@@ -11110,9 +11030,9 @@ describe('OrcaRuntimeService', () => {
     expect(spawn).toHaveBeenCalledTimes(2)
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
-        command: expect.stringContaining("'--resume' '/custom/omp/project/session.jsonl'"),
+        command: expect.stringContaining("'resume' 'provider-session-1'"),
         agentSessionEnsure: expect.objectContaining({
-          claim: expect.objectContaining({ agent: 'omp' })
+          claim: expect.objectContaining({ agent: 'codex' })
         })
       })
     )
@@ -21690,35 +21610,6 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
-  it('reuses pane close for live PTYs that do not own a renderer tab', async () => {
-    const kill = vi.fn(() => true)
-    const closeTerminalTab = vi.fn(async () => {})
-    const runtime = new OrcaRuntimeService(store)
-    runtime.setNotifier({ closeTerminal: vi.fn(), closeTerminalTab } as never)
-    runtime.setPtyController({
-      write: () => true,
-      kill,
-      getForegroundProcess: async () => null,
-      listProcesses: async () => [
-        {
-          id: 'floating-created-pty',
-          cwd: TEST_WORKTREE_PATH,
-          title: 'Claude'
-        }
-      ]
-    })
-    runtime.registerPty('floating-created-pty', TEST_WORKTREE_ID)
-    const [terminal] = (await runtime.listTerminals()).terminals
-
-    await expect(runtime.closeTerminalTab(terminal.handle)).resolves.toEqual({
-      handle: terminal.handle,
-      tabId: terminal.tabId,
-      ptyKilled: true
-    })
-    expect(kill).toHaveBeenCalledWith('floating-created-pty')
-    expect(closeTerminalTab).not.toHaveBeenCalled()
-  })
-
   it('durably closes every split leaf without a renderer', async () => {
     const { runtimeStore, getSession } = makeRuntimeStoreWithWorkspaceSession(
       makeWorkspaceSessionWithHeadlessTerminal({
@@ -30883,6 +30774,42 @@ describe('OrcaRuntimeService', () => {
       repos.map((repo) => `${repo.path}/main`)
     )
     expect(listWorktrees).toHaveBeenCalledTimes(15)
+  })
+
+  it('bounds resolved worktree scanning to a fixed repo worker pool', async () => {
+    vi.mocked(listWorktrees).mockReset()
+    const repos = Array.from({ length: 40 }, (_, index) => ({
+      id: `repo-${index}`,
+      path: `/tmp/repo-${index}`,
+      displayName: `repo-${index}`,
+      badgeColor: 'blue' as const,
+      addedAt: 1
+    }))
+    const gate = deferred<void>()
+    let inFlight = 0
+    let peak = 0
+    vi.mocked(listWorktrees).mockImplementation(async (repoPath) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await gate.promise
+      inFlight -= 1
+      return [makeWorktreeInfo(repoPath)]
+    })
+    const runtime = new OrcaRuntimeService({
+      ...store,
+      getRepos: () => repos,
+      getRepo: (id: string) => repos.find((candidate) => candidate.id === id),
+      getAllWorktreeMeta: () => ({}),
+      getWorktreeMeta: () => undefined
+    } as never)
+
+    const listing = runtime.listManagedWorktrees()
+    await vi.waitFor(() => expect(listWorktrees).toHaveBeenCalledTimes(8))
+    expect(peak).toBe(8)
+    gate.resolve()
+    await expect(listing).resolves.toMatchObject({ totalCount: repos.length })
+    expect(listWorktrees).toHaveBeenCalledTimes(repos.length)
+    expect(peak).toBe(8)
   })
 
   it('worktree scan cache: shares one in-flight repo scan across concurrent consumers', async () => {

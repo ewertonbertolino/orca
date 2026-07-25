@@ -77,6 +77,16 @@ describe('check-bounded-ingress', () => {
     ).toEqual([])
   })
 
+  it('keeps the CLI boot-check wired into the desktop and release builds', () => {
+    // Electron output once clobbered a CLI dependency emitted under out/main; the boot-check is the
+    // guard, and CI calls `pnpm verify:cli-runtime` directly, so a dropped script fails the job.
+    const root = path.resolve(import.meta.dirname, '../..')
+    const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
+    expect(pkg.scripts['verify:cli-runtime']).toBeDefined()
+    expect(pkg.scripts['build:desktop']).toContain('verify:cli-runtime')
+    expect(pkg.scripts['build:release']).toContain('verify:cli-runtime')
+  })
+
   it('stays wired into pnpm lint', () => {
     // A gate that can be unwired without any test failing WILL be unwired by a rebase — this one
     // already was once, and the ratchet cannot detect its own removal.

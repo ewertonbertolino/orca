@@ -65,9 +65,9 @@
     "build:cli": "tsc -p config/tsconfig.cli.json --outDir out --composite false --incremental false && node config/scripts/verify-cli-bin.mjs --fix-executable --fix-package-json && node config/scripts/install-dev-cli.mjs",
     "build:electron-vite": "node config/scripts/run-electron-vite-build.mjs",
     "build:web": "node config/scripts/run-vite-web-build.mjs && node config/scripts/verify-web-build.mjs",
-    "build:desktop": "pnpm run typecheck && pnpm run build:relay && pnpm run build:cli && pnpm run build:electron-vite && pnpm run build:web",
+    "build:desktop": "pnpm run typecheck && pnpm run build:relay && pnpm run build:cli && pnpm run build:electron-vite && pnpm run verify:cli-runtime && pnpm run build:web",
     "build": "pnpm run build:desktop && pnpm run build:native",
-    "build:release": "pnpm run build:relay && pnpm run build:native && pnpm run verify:computer-native && pnpm run build:cli && pnpm run build:electron-vite && pnpm run build:web",
+    "build:release": "pnpm run build:relay && pnpm run build:native && pnpm run verify:computer-native && pnpm run build:cli && pnpm run build:electron-vite && pnpm run verify:cli-runtime && pnpm run build:web",
     "postinstall": "node config/scripts/rebuild-native-deps.mjs",
     "rebuild:electron": "node config/scripts/rebuild-native-deps.mjs",
     "rebuild:node": "pnpm rebuild node-pty",
@@ -105,7 +105,8 @@
     "bench:cold-park-reveal": "pnpm run ensure:electron-runtime && node tools/benchmarks/terminal-cold-park-reveal-bench.mjs",
     "bench:cold-park-resource": "pnpm run ensure:electron-runtime && node tools/benchmarks/terminal-cold-park-resource-bench.mjs",
     "bench:compare": "node config/scripts/compare-benchmark-artifacts.mjs",
-    "check:bounded-ingress": "node config/scripts/check-bounded-ingress.mjs"
+    "check:bounded-ingress": "node config/scripts/check-bounded-ingress.mjs",
+    "verify:cli-runtime": "node config/scripts/verify-cli-bin.mjs --run-help"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
